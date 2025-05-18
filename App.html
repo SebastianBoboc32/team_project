@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MQ-6 LPG Dashboard – Live Chart & Hourly Table</title>
+
+    <script
+      crossorigin
+      src="https://unpkg.com/react@18/umd/react.development.js"
+    ></script>
+    <script
+      crossorigin
+      src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"
+    ></script>
+
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 0;
+        padding: 2rem;
+        background: #f6f7fb;
+        color: #222;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2rem;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.8rem;
+      }
+      .card {
+        background: #fff;
+        border-radius: 1rem;
+        padding: 1.5rem;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        width: 100%;
+        max-width: 960px;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        margin: 0.4rem 0;
+      }
+      .val {
+        font-weight: 600;
+      }
+      #ppm {
+        font-size: 2.4rem;
+        line-height: 1.2;
+      }
+      canvas {
+        max-height: 320px;
+        width: 100%;
+      }
+      .badge {
+        color: #fff;
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.5rem;
+        font-weight: 600;
+        font-size: 0.85rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+        margin-top: 0.5rem;
+      }
+      th,
+      td {
+        padding: 0.35rem 0.5rem;
+        border-bottom: 1px solid #e2e8f0;
+        text-align: right;
+      }
+      th {
+        background: #f1f5f9;
+        text-align: center;
+        font-weight: 600;
+      }
+      td:first-child,
+      th:first-child {
+        text-align: left;
+      }
+      .hist-wrap {
+        max-height: 280px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>MQ-6 LPG Dashboard – Live & Hourly Table</h1>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="env,react">
+      const { useState, useEffect, useRef } = React;
+      const MAX_CHART = 300;
+      const RAW_KEY = "mq6-raw";
+      const HOURS_LIST = "mq6-hours";
+      const HOUR_PREFIX = "mq6-hour-";
+
+      const floorHour = (ts) => {
+        const d = new Date(ts);
+        d.setMinutes(0, 0, 0);
+        return d.getTime();
+      };
+      const fmtHour = (ts) =>
+        new Date(ts).toLocaleString(undefined, {
+          year: "2-digit",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+
+      function Dashboard({ wsUrl = `ws://${location.host}` }) {
+        const [live, setLive] = useState({
+          ppm: null,
+          raw: null,
+          voltage: null,
+          alarm: 0,
+        });
+        const [labels, setLabels] = useState([]);
+        const [values, setValues] = useState([]);
+
+        const [hourRows, setHourRows] = useState([]);
+
+        const rawRef = useRef([]);
+        const hourList = useRef([]);
+        const chartRef = useRef();
+        const chartObj = useRef();
+
+        useEffect(() => {
+          try {
+            rawRef.current = JSON.parse(localStorage.getItem(RAW_KEY) || "[]");
+            hourList.current = JSON.parse(
+              localStorage.getItem(HOURS_LIST) || "[]"
+            );
+          } catch {
+            rawRef.current = [];
+            hourList.current = [];
+          }
+
+          const seed = rawRef.current.slice(-MAX_CHART);
+          setLabels(seed.map((r) => new Date(r.ts).toLocaleTimeString()));
+          setValues(seed.map((r) => r.ppm));
+
+          updateHourRows();
+        }, []);
+
+        const updateHourRows = () => {
+          const hrs = hourList.current.map((hk) => {
+            const rec = JSON.parse(
+              localStorage.getItem(HOUR_PREFIX + hk) || "{}"
+            );
+            return { hour: hk, avg: rec.avg, label: fmtHour(hk) };
+          });
+          hrs.sort((a, b) => b.hour - a.hour);
+          setHourRows(hrs);
+        };
+
+        useEffect(() => {
+          const ws = new WebSocket(wsUrl);
+          ws.onmessage = (e) => {
+            let msg;
+            try {
+              msg = JSON.parse(e.data);
+            } catch {
+              return;
+            }
+            if (msg.ppm === undefined) return;
+            const ts = Date.now();
+
+            rawRef.current.push({ ts, ...msg });
+            if (rawRef.current.length > 10000) rawRef.current.shift();
+            localStorage.setItem(RAW_KEY, JSON.stringify(rawRef.current));
+
+            const hk = floorHour(ts);
+
+            let rec;
+            try {
+              rec = JSON.parse(localStorage.getItem(HOUR_PREFIX + hk)) || {
+                avg: 0,
+                count: 0,
+              };
+            } catch {
+              rec = { avg: 0, count: 0 };
+            }
+
+            rec.avg = (rec.avg * rec.count + msg.ppm) / (rec.count + 1);
+            rec.count += 1;
+
+            localStorage.setItem(HOUR_PREFIX + hk, JSON.stringify(rec));
+
+            if (!hourList.current.includes(hk)) {
+              hourList.current.push(hk);
+              localStorage.setItem(
+                HOURS_LIST,
+                JSON.stringify(hourList.current)
+              );
+            }
+
+            updateHourRows();
+
+            setLive(msg);
+            setLabels((l) => {
+              const n = [...l, new Date(ts).toLocaleTimeString()];
+              return n.length > MAX_CHART ? n.slice(-MAX_CHART) : n;
+            });
+            setValues((v) => {
+              const n = [...v, msg.ppm];
+              return n.length > MAX_CHART ? n.slice(-MAX_CHART) : n;
+            });
+          };
+          return () => ws.close();
+        }, [wsUrl]);
+
+        useEffect(() => {
+          const ctx = chartRef.current.getContext("2d");
+          chartObj.current = new Chart(ctx, {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [
+                {
+                  label: "LPG ppm",
+                  data: [],
+                  borderWidth: 2,
+                  fill: false,
+                  tension: 0.3,
+                },
+              ],
+            },
+            options: {
+              animation: false,
+              responsive: true,
+              scales: { x: { display: false }, y: { beginAtZero: true } },
+              plugins: { legend: { display: false } },
+            },
+          });
+        }, []);
+
+        useEffect(() => {
+          if (!chartObj.current) return;
+          chartObj.current.data.labels = labels;
+          chartObj.current.data.datasets[0].data = values;
+          chartObj.current.update("none");
+        }, [labels, values]);
+
+        const badgeStyle = { background: live.alarm ? "#ef4444" : "#10b981" };
+
+        return (
+          <>
+            <div className="card">
+              <div className="row">
+                <span>Current PPM</span>
+                <span id="ppm">
+                  {live.ppm !== null ? live.ppm.toFixed(1) : "—"}
+                </span>
+              </div>
+              <div className="row">
+                <span>Raw ADC</span>
+                <span className="val">{live.raw ?? "—"}</span>
+              </div>
+              <div className="row">
+                <span>Voltage (V)</span>
+                <span className="val">
+                  {live.voltage !== null ? live.voltage.toFixed(2) : "—"}
+                </span>
+              </div>
+              <div className="row">
+                <span>Status</span>
+                <span className="badge" style={badgeStyle}>
+                  {live.alarm ? "ALARM" : "OK"}
+                </span>
+              </div>
+            </div>
+            <div className="card">
+              <canvas ref={chartRef}></canvas>
+            </div>
+            <div className="card">
+              <h3 style={{ marginTop: 0 }}>Hourly Report</h3>
+              <div className="hist-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Hour</th>
+                      <th>Avg PPM</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {hourRows.map((r) => (
+                      <tr key={r.hour}>
+                        <td>{r.label}</td>
+                        <td>{r.avg.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        );
+      }
+      ReactDOM.createRoot(document.getElementById("root")).render(
+        <Dashboard wsUrl="ws://localhost:3000" />
+      );
+    </script>
+  </body>
+</html>
